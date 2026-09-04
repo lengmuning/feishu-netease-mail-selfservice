@@ -1,0 +1,165 @@
+import importlib.util
+import os
+from pathlib import Path
+import unittest
+
+
+os.environ.setdefault("SESSION_SECRET", "test-session-secret-with-32-bytes")
+MODULE_PATH = Path(__file__).resolve().parents[1] / "app.py"
+SPEC = importlib.util.spec_from_file_location("mail_self_service_app", MODULE_PATH)
+app = importlib.util.module_from_spec(SPEC)
+assert SPEC.loader
+SPEC.loader.exec_module(app)
+
+# Deployment-neutral fixtures.  Real domains, unit ids and names live only in
+# the production config.env, never in the repository.
+DOMAIN = "example.com"
+LEGACY_DOMAIN = "legacy.example.com"
+COMPANY = "示例科技有限公司"
+ROOT_UNIT_ID = "100000"
+
+
+class NormalizationTests(unittest.TestCase):
+    def test_normalize_phone_removes_cn_prefix(self):
+        self.assertEqual(app.normalize_phone("+86-138 0013 8000"), "13800138000")
+
+    def test_masked_phone_only_keeps_last_four(self):
+        self.assertEqual(app.masked_phone("13800138000"), "*******8000")
+
+    def test_account_emails_include_primary_alias_and_mail_accounts(self):
+        account = {
+            "accountName": "alice",
+            "domain": LEGACY_DOMAIN,
+            "aliasList": ["short"],
+            "aliasEmailList": [f"alice@{DOMAIN}"],
+            "mailAccountList": [{"accountName": "alice", "domain": "another.example"}],
+        }
+        self.assertEqual(
+            app.account_emails(account, DOMAIN),
+            [
+                f"alice@{LEGACY_DOMAIN}",
+                f"alice@{DOMAIN}",
+                f"short@{DOMAIN}",
+                "alice@another.example",
+            ],
+        )
+
+    def test_session_signature_rejects_tampering(self):
+        codec = app.SessionCodec(b"test-session-secret-with-32-bytes")
+        token = codec.encode({"exp": 4102444800, "employee_no": "A001"})
+        self.assertEqual(codec.decode(token)["employee_no"], "A001")
+        self.assertIsNone(codec.decode(token + "x"))
+
+    def test_oauth_query_is_removed_from_access_log_line(self):
+        line = "GET /auth/feishu/callback?code=secret&state=signed HTTP/1.1"
+        self.assertEqual(
+            app.sanitize_request_line(line),
+            "GET /auth/feishu/callback HTTP/1.1",
+        )
+
+
+class ProvisionGuardTests(unittest.TestCase):
+    def setUp(self):
+        app.NETEASE_DOMAIN = DOMAIN
+        app.FEISHU_DEPARTMENT_ANCHOR = COMPANY
+        app.NETEASE_ROOT_UNIT_ID = ROOT_UNIT_ID
+
+    def test_target_is_derived_from_the_feishu_work_email(self):
+        account, email = app.provision_target({"email": f"Zhang.San@{DOMAIN.upper()}"})
+        self.assertEqual(account, "zhang.san")
+        self.assertEqual(email, f"zhang.san@{DOMAIN}")
+
+    def test_work_email_outside_the_pinned_domain_is_rejected(self):
+        with self.assertRaises(app.ServiceError):
+            app.provision_target({"email": "zhangsan@gmail.com"})
+
+    def test_missing_work_email_is_rejected(self):
+        with self.assertRaises(app.ServiceError):
+            app.provision_target({"email": ""})
+
+    def test_browser_may_not_name_a_target(self):
+        app.reject_target_keys({})
+        for payload in ({"employeeNo": "A002"}, {"accountName": "other"}, {"password": "x"}, {"foo": 1}):
+            with self.assertRaises(app.ServiceError):
+                app.reject_target_keys(payload)
+
+    def test_generated_password_avoids_ambiguous_characters(self):
+        for _ in range(200):
+            password = app.generate_initial_password()
+            self.assertGreaterEqual(len(password), 8)
+            self.assertFalse(set(password) & set("O0Il1"))
+            self.assertTrue(any(c.isupper() for c in password))
+            self.assertTrue(any(c.isdigit() for c in password))
+
+    def test_rate_limiter_stops_the_sixth_attempt(self):
+        limiter = app.RateLimiter()
+        for _ in range(5):
+            limiter.check("ou_1", "provision")
+        with self.assertRaises(app.ServiceError):
+            limiter.check("ou_1", "provision")
+        limiter.check("ou_2", "provision")
+
+    def test_concurrent_write_for_one_employee_is_refused(self):
+        locks = app.OperationLocks()
+        with locks.hold("A001"):
+            with self.assertRaises(app.ServiceError):
+                with locks.hold("A001"):
+                    pass
+            with locks.hold("A002"):
+                pass
+        with locks.hold("A001"):
+            pass
+
+    def test_notification_carries_the_address_and_password(self):
+        text = app.notification_text("provision", "张三", f"zhangsan@{DOMAIN}", "Ab234567!x")
+        self.assertIn(f"zhangsan@{DOMAIN}", text)
+        self.assertIn("Ab234567!x", text)
+
+    def test_department_path_is_scoped_below_company_anchor(self):
+        self.assertEqual(
+            app.relative_department_path(["集团", COMPANY, "战略企划", "信息运维岗"]),
+            ["战略企划", "信息运维岗"],
+        )
+
+    def test_department_path_without_company_anchor_is_rejected(self):
+        with self.assertRaises(app.ServiceError):
+            app.relative_department_path(["其他租户", "信息运维岗"])
+
+    def test_missing_department_is_created_under_exact_parent(self):
+        app.CREATE_MISSING_UNITS = True
+
+        class FakeNetEase(app.NetEaseClient):
+            def __init__(self):
+                super().__init__()
+                self.items = [
+                    {"unitId": ROOT_UNIT_ID, "unitName": COMPANY, "unitParentId": ""},
+                    {"unitId": "10", "unitName": "战略企划", "unitParentId": ROOT_UNIT_ID},
+                ]
+
+            def units(self, refresh=False):
+                return list(self.items)
+
+            def create_unit(self, parent_id, name):
+                unit_id = str(len(self.items) + 10)
+                self.items.append({"unitId": unit_id, "unitName": name, "unitParentId": parent_id})
+                return unit_id
+
+        client = FakeNetEase()
+        unit_id, created = client.resolve_or_create_unit([COMPANY, "战略企划", "信息运维岗"])
+        self.assertEqual(created, ["信息运维岗"])
+        self.assertEqual(unit_id, "12")
+        self.assertEqual(client.items[-1]["unitParentId"], "10")
+
+    def test_missing_department_is_refused_when_auto_create_is_off(self):
+        app.CREATE_MISSING_UNITS = False
+
+        class FakeNetEase(app.NetEaseClient):
+            def units(self, refresh=False):
+                return [{"unitId": ROOT_UNIT_ID, "unitName": COMPANY, "unitParentId": ""}]
+
+        with self.assertRaises(app.ServiceError):
+            FakeNetEase().resolve_or_create_unit([COMPANY, "不存在的部门"])
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>企业邮箱自助服务</title>
+  <meta name="app-base" content="{{BASE_PATH}}">
+  <link rel="stylesheet" href="{{BASE_PATH}}/styles.css">
+</head>
+<body>
+  <main class="shell">
+    <header class="hero">
+      <div>
+        <span class="eyebrow">NETEASE MAIL SELF SERVICE</span>
+        <h1>企业邮箱自助服务</h1>
+        <p>根据当前飞书名片的工号，核对网易企业邮箱、别名、手机与组织归属，并办理本人邮箱。</p>
+      </div>
+      <div class="test-badge">飞书身份核验</div>
+    </header>
+
+    <section id="loading" class="panel notice">正在确认飞书身份…</section>
+
+    <section id="login" class="panel login hidden">
+      <div class="icon">邮</div>
+      <h2>使用飞书身份进入</h2>
+      <p>系统不允许输入或选择其他员工，只读取当前飞书账号的个人名片。</p>
+      <button id="loginButton" class="button primary" type="button">飞书授权登录</button>
+      <p class="fine-print">开通与改密只作用于你本人的账号，初始密码只通过飞书私聊发送给你。</p>
+    </section>
+
+    <section id="workspace" class="hidden">
+      <section class="panel">
+        <div class="section-heading">
+          <div>
+            <span class="step">01</span>
+            <h2>飞书身份</h2>
+          </div>
+          <span class="verified">已验证本人</span>
+        </div>
+        <dl class="identity-grid">
+          <div><dt>姓名</dt><dd id="name">—</dd></div>
+          <div><dt>工号</dt><dd id="employeeNo">—</dd></div>
+          <div><dt>工作邮箱</dt><dd id="workEmail">—</dd></div>
+          <div><dt>手机号</dt><dd id="mobile">—</dd></div>
+          <div class="wide"><dt>飞书组织路径</dt><dd id="departmentPath">—</dd></div>
+        </dl>
+        <p id="departmentWarning" class="inline-warning hidden"></p>
+      </section>
+
+      <section class="panel result-panel">
+        <div class="section-heading">
+          <div>
+            <span class="step">02</span>
+            <h2>企业邮箱自助服务</h2>
+          </div>
+          <span id="state" class="state" data-state="loading">查询中</span>
+        </div>
+
+        <div id="message" class="result-message">正在读取网易企业邮箱信息…</div>
+
+        <div id="checks" class="checks hidden">
+          <div data-check="employeeNo"><span>工号一致</span><b>—</b></div>
+          <div data-check="workEmail"><span>邮箱或别名一致</span><b>—</b></div>
+          <div data-check="mobile"><span>手机号一致</span><b>—</b></div>
+          <div data-check="targetOrganization"><span>属于目标组织</span><b>—</b></div>
+          <div data-check="uniqueAccount"><span>账号唯一</span><b>—</b></div>
+        </div>
+
+        <dl id="record" class="record hidden">
+          <div><dt>网易基础账号</dt><dd id="primaryEmail">—</dd></div>
+          <div><dt>邮箱别名</dt><dd id="aliases">—</dd></div>
+          <div><dt>登记手机</dt><dd id="neteaseMobile">—</dd></div>
+          <div><dt>网易组织路径</dt><dd id="unitPath">—</dd></div>
+        </dl>
+
+        <div class="actions action-three">
+          <button id="refresh" class="button" type="button">重新核对</button>
+          <button id="provision" class="button primary" type="button" disabled>开通企业邮箱</button>
+          <button id="mailPassword" class="button" type="button" disabled>重置邮箱密码</button>
+        </div>
+        <div id="mailMessage" class="result-message hidden"></div>
+        <p id="provisionHint" class="fine-print">正在读取当前状态…</p>
+      </section>
+
+      <footer>
+        <span>目标组织：{{ROOT_UNIT_NAME}}</span>
+        <a href="/logout">退出</a>
+      </footer>
+    </section>
+  </main>
+  <script src="{{BASE_PATH}}/app.js" defer></script>
+</body>
+</html>
