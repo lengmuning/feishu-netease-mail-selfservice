@@ -51,16 +51,22 @@ the root unit; with `CREATE_MISSING_UNITS=1` missing child units are created
 there, otherwise the operation stops and names the missing unit. Duplicate
 sibling names always stop it.
 
-NetEase receives the employee number, mobile, display name, target unit and a
-server-generated password. `NETEASE_PASS_CHANGE_FIRST_LOGIN=2` forces a web
-password change and blocks clients until it is changed. A post-write query
-confirms the final state; anything short of `matched` is surfaced as a warning
-rather than an abort, because the password still has to reach the employee.
+NetEase receives the employee number, mobile, Feishu display name, target unit
+and a server-generated password. `NETEASE_PASS_CHANGE_FIRST_LOGIN=2` forces a
+web password change and blocks clients until it is changed. After NetEase
+accepts the write, the service delivers the password before the post-write
+query. A slow or failed read-back can therefore never suppress a live
+credential; the page disables both write actions and asks the employee to
+refresh later instead of repeating the operation.
 
 Before any NetEase write the Feishu bot sends a preflight message; if it
 cannot deliver, the write is refused. On success the bot privately sends the
 mailbox address, initial password and web login URL. Passwords are never
 returned to the browser or written to logs.
+
+The desktop UI uses a compact four-column identity card and content-sized
+comparison cards so the identity, verdict and actions fit into a typical
+Feishu desktop window. It falls back to a single-column layout on mobile.
 
 ### Security and operations
 
@@ -142,6 +148,10 @@ before opening it up.
 
 ### Verification
 
+The suite currently contains 20 tests, including regression cases for both
+provisioning and password reset when notification delivery or the NetEase
+read-back fails.
+
 ```bash
 PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests -v
 node --check static/app.js
@@ -176,9 +186,11 @@ python3 -m py_compile app.py
 
 对 `eligible` 的员工，写接口会在按工号加的锁内重新执行飞书和网易两侧的校验。账号名取飞书工作邮箱 `@` 前面的部分，域名必须等于 `NETEASE_DOMAIN`。飞书部门路径在 `FEISHU_DEPARTMENT_ANCHOR` 处截断，只保留其后的部分，然后从网易根部门开始逐级按「父部门 + 名称」匹配；`CREATE_MISSING_UNITS=1` 时缺失的子部门会被创建，否则操作停止并报出缺少的部门名。同级重名一律停止。
 
-写入网易的字段有工号、手机号、显示名、目标部门和服务端生成的随机密码。`NETEASE_PASS_CHANGE_FIRST_LOGIN=2` 强制首次 Web 登录改密，改密前客户端不能登录。写入后会再查一次网易确认最终状态；未达到 `matched` 只作为提醒附在消息里，不会中止，因为密码仍然必须送到员工手里。
+写入网易的字段有工号、手机号、飞书姓名、目标部门和服务端生成的随机密码。`NETEASE_PASS_CHANGE_FIRST_LOGIN=2` 强制首次 Web 登录改密，改密前客户端不能登录。网易确认写操作成功后，系统先把密码发送给员工，再查询网易确认最终状态。因此，复查超时或失败不会阻断有效密码的发送；页面会禁用两个写操作并提示稍后刷新核对，避免员工重复操作。
 
 任何网易写操作之前，飞书机器人先发一条预检消息，发不出去就拒绝写入。成功后机器人私聊发送邮箱地址、初始密码和 Web 登录地址。密码不回传浏览器、不写入日志。
+
+桌面端采用紧凑的四列身份信息区和按内容收缩的核对卡片，使身份、结论和操作按钮能在常见飞书桌面窗口中完整显示；手机端自动切换为单列布局。
 
 ### 安全与运维
 
@@ -243,6 +255,8 @@ curl -s http://127.0.0.1:8500/healthz
 上线顺序：保持 `READ_ONLY=1`，依次验证 OAuth、身份卡片、部门路径（必须包含 `FEISHU_DEPARTMENT_ANCHOR`）、机器人投递和网易核对结论；然后把 `READ_ONLY` 改为 `0`，先用测试账号开通一次，再向员工开放。
 
 ### 验证
+
+当前测试套件共 20 项，覆盖邮箱开通和密码重置，也覆盖飞书通知失败、网易写后复查失败等回归场景。
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests -v

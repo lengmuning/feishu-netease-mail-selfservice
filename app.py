@@ -1307,19 +1307,8 @@ class Handler(BaseHTTPRequestHandler):
                 netease.update_password(account_name, password)
                 message = "企业邮箱密码重置成功"
 
-            # Confirm against NetEase rather than trusting the write response.
-            # NetEase already reported success, so a verdict short of `matched`
-            # downgrades the message instead of aborting: the password still has
-            # to reach the employee, or they are locked out of a live mailbox.
-            after = netease.check_employee(contact, refresh=True)
-            verify_warning = ""
-            if str(after.get("state")) != "matched":
-                log.warning(
-                    "post-write verification did not reach matched action=%s employee_no=%s state=%s",
-                    action, employee_no, after.get("state"),
-                )
-                verify_warning = "；网易尚未确认最终状态，请稍后重新核对，若仍未生效请联系管理员"
-
+            # Deliver the password immediately after a successful write. A slow
+            # or failed read-back must never prevent delivery of live credentials.
             try:
                 send_feishu_text_with_retry(
                     open_id, notification_text(action, display_name, work_email, password)
@@ -1330,6 +1319,23 @@ class Handler(BaseHTTPRequestHandler):
                 audit(action + ":notify", claims, "warning", request_id, str(exc))
                 log.warning("feishu notification failed request_id=%s action=%s", request_id, action)
                 message += "；操作已完成，但随机密码飞书发送失败，请立即联系管理员重置密码"
+            verify_warning = ""
+            try:
+                after = netease.check_employee(contact, refresh=True)
+            except Exception:
+                # Do not reuse the pre-write eligible state or expose raw errors.
+                # The write succeeded, but its final state is not yet verified.
+                log.warning("post-write verification failed request_id=%s action=%s", request_id, action)
+                after = {
+                    "state": "error",
+                    "readOnly": READ_ONLY,
+                    "canProvision": False,
+                    "actions": {"provision": False, "password": False},
+                }
+            if str(after.get("state")) != "matched":
+                verify_warning = "；操作已完成，但最终状态暂未核实，请稍后刷新核对，勿重复操作"
+                after = {**after, "canProvision": False,
+                         "actions": {"provision": False, "password": False}}
             if unit_warning:
                 message += unit_warning
             message += verify_warning
