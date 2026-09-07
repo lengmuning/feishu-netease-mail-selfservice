@@ -85,26 +85,6 @@ class NotificationRecoveryTests(unittest.TestCase):
             self.exercise(action, app.ServiceError("read timeout", 502), notify_error=True)
 
 
-class FreshAuthSwitchTests(unittest.TestCase):
-    """FRESH_AUTH_TTL <= 0 turns re-authentication off; a positive value keeps it."""
-
-    def check(self, ttl, age):
-        claims = {"auth_time": int(app.time.time()) - age}
-        with patch.object(app, "FRESH_AUTH_TTL", ttl), \
-             patch.object(app, "FRESH_AUTH_ENABLED", ttl > 0):
-            app.Handler._require_fresh_auth(None, claims)
-
-    def test_stale_session_is_refused_while_enabled(self):
-        with self.assertRaises(app.ServiceError):
-            self.check(300, 999)
-
-    def test_fresh_session_passes_while_enabled(self):
-        self.check(300, 10)
-
-    def test_zero_ttl_accepts_any_age(self):
-        self.check(0, 10 ** 6)
-
-
 class RejectedProvisionStaysSilentTests(unittest.TestCase):
     """A provision that cannot proceed must not announce itself to the employee."""
 

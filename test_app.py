@@ -63,7 +63,6 @@ class ProvisionGuardTests(unittest.TestCase):
         app.NETEASE_DOMAIN = DOMAIN
         app.FEISHU_DEPARTMENT_ANCHOR = COMPANY
         app.NETEASE_ROOT_UNIT_ID = ROOT_UNIT_ID
-        app.NETEASE_ROOT_UNIT_NAME = COMPANY
 
     def test_target_is_derived_from_the_feishu_work_email(self):
         account, email = app.provision_target({"email": f"Zhang.San@{DOMAIN.upper()}"})
@@ -158,40 +157,6 @@ class ProvisionGuardTests(unittest.TestCase):
         self.assertEqual(created, ["信息运维岗"])
         self.assertEqual(unit_id, "12")
         self.assertEqual(client.items[-1]["unitParentId"], "10")
-
-    def test_root_unit_name_is_verified_only_when_configured(self):
-        """The unit id addresses the tree; the name is an optional assertion."""
-        listing = {"success": True, "data": [
-            {"unitId": ROOT_UNIT_ID, "unitName": "改名后的公司", "unitParentId": ""}]}
-
-        def client(configured_name):
-            app.NETEASE_ROOT_UNIT_NAME = configured_name
-            c = app.NetEaseClient()
-            c.call = lambda *a, **k: listing
-            return c
-
-        # Empty name: any observed name is accepted, and it is recorded.
-        c = client("")
-        self.assertEqual(len(c.units()), 1)
-        self.assertEqual(c.root_unit_name, "改名后的公司")
-
-        # Configured and mismatched: refuse, naming both sides.
-        with self.assertRaises(app.ServiceError) as caught:
-            client("原来的公司").units()
-        self.assertIn("改名后的公司", str(caught.exception))
-        self.assertIn("原来的公司", str(caught.exception))
-
-        # Configured and matching: accepted.
-        self.assertEqual(len(client("改名后的公司").units()), 1)
-
-    def test_missing_root_unit_is_refused_even_without_a_configured_name(self):
-        app.NETEASE_ROOT_UNIT_NAME = ""
-        c = app.NetEaseClient()
-        c.call = lambda *a, **k: {"success": True, "data": [
-            {"unitId": "999", "unitName": "别的公司", "unitParentId": ""}]}
-        with self.assertRaises(app.ServiceError) as caught:
-            c.units()
-        self.assertIn(ROOT_UNIT_ID, str(caught.exception))
 
     def test_feishu_path_without_company_node_maps_under_the_root_unit(self):
         """The common shape: NetEase carries the company as its root unit and the

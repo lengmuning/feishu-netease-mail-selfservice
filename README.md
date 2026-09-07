@@ -46,7 +46,8 @@ browser never re-derives what is permitted.
 For an `eligible` employee the write endpoint repeats the Feishu and NetEase
 checks inside a per-employee lock. The account name is the local part of the
 Feishu work email, which must sit in `NETEASE_DOMAIN`. The Feishu department
-path is cut at `FEISHU_DEPARTMENT_ANCHOR` and matched parent-by-parent below
+path is cut at `FEISHU_DEPARTMENT_ANCHOR` (leave it empty to mirror the whole
+path, see below) and matched parent-by-parent below
 the root unit; with `CREATE_MISSING_UNITS=1` missing child units are created
 there, otherwise the operation stops and names the missing unit. Duplicate
 sibling names always stop it.
@@ -64,6 +65,24 @@ cannot deliver, the write is refused. On success the bot privately sends the
 mailbox address, initial password and web login URL. Passwords are never
 returned to the browser or written to logs.
 
+`FEISHU_DEPARTMENT_ANCHOR` names the Feishu department that stands for the
+company, so that in a tenant holding several companies one company's employees
+cannot land in another's unit tree. Many tenants have no such node: they are
+organized by function, or they hold a single company. Leave the anchor empty
+there and the whole department path is mirrored below the root unit; the
+company boundary is then the one already enforced by the per-tenant Feishu
+application, the pinned root unit and the work-email domain check. Read a real
+employee's path before choosing, because a wrong anchor rejects every request.
+
+`NETEASE_ROOT_UNIT_ID` is what addresses the NetEase tree; every read and write
+is confined below it and the unit must exist. `NETEASE_ROOT_UNIT_NAME` is an
+optional assertion that the id still points at the company you think it does.
+When set it is checked on every unit listing and a mismatch stops the service,
+so renaming the unit in NetEase means updating the config and restarting. Leave
+it empty to skip the check: a rename then causes no outage and the observed
+name is logged instead, at the cost of losing the one guard against a wrong or
+reassigned unit id.
+
 The desktop UI uses a compact four-column identity card and content-sized
 comparison cards so the identity, verdict and actions fit into a typical
 Feishu desktop window. It falls back to a single-column layout on mobile.
@@ -72,7 +91,10 @@ Feishu desktop window. It falls back to a single-column layout on mobile.
 
 - `READ_ONLY=1` is the shipped default and the master write kill switch.
 - Every POST needs the signed session cookie and the CSRF token.
-- Password reset requires a Feishu authentication newer than `FRESH_AUTH_TTL`.
+- Password reset requires a Feishu authentication newer than `FRESH_AUTH_TTL`;
+  set it to 0 to drop that step. The new password only ever reaches the account
+  owner's own Feishu, so a hijacked session cannot steal a credential with or
+  without it, and the check guards against a nuisance reset alone.
 - Employee status is re-read from Feishu immediately before every write.
 - Writes are rate limited (5 per 10 minutes per user) and serialized per
   employee; unit creation has a separate global lock.
@@ -142,15 +164,18 @@ its public origin. Set `TRUST_PROXY=1` so client IPs in logs come from
 `X-Forwarded-For`.
 
 Rollout order: keep `READ_ONLY=1`, verify OAuth, the identity card, the
-department path (it must contain `FEISHU_DEPARTMENT_ANCHOR`), bot delivery and
+department path (it must contain `FEISHU_DEPARTMENT_ANCHOR`, or the anchor must
+be empty), bot delivery and
 the NetEase verdict; then set `READ_ONLY=0` and provision one test account
 before opening it up.
 
 ### Verification
 
-The suite currently contains 20 tests, including regression cases for both
-provisioning and password reset when notification delivery or the NetEase
-read-back fails.
+The suite currently contains 34 tests, including exact recognition of NetEase's
+`-3 + ACCOUNT.NOTEXIST` response (other business failures still block creation),
+regression cases for both provisioning and password reset when notification
+delivery or the NetEase read-back fails, and cases proving a provision that
+cannot proceed neither notifies the employee nor touches NetEase.
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests -v
@@ -186,6 +211,10 @@ python3 -m py_compile app.py
 
 对 `eligible` 的员工，写接口会在按工号加的锁内重新执行飞书和网易两侧的校验。账号名取飞书工作邮箱 `@` 前面的部分，域名必须等于 `NETEASE_DOMAIN`。飞书部门路径在 `FEISHU_DEPARTMENT_ANCHOR` 处截断，只保留其后的部分，然后从网易根部门开始逐级按「父部门 + 名称」匹配；`CREATE_MISSING_UNITS=1` 时缺失的子部门会被创建，否则操作停止并报出缺少的部门名。同级重名一律停止。
 
+`NETEASE_ROOT_UNIT_ID` 是寻址网易部门树的唯一依据，所有读写都被限制在它之下，该部门必须存在。`NETEASE_ROOT_UNIT_NAME` 只是一道可选断言，用来确认这个 ID 指向的还是你以为的那家公司：配了就在每次拉取部门列表时校验，不一致直接停止服务（fail closed），因此在网易后台改名后必须同步改配置并重启。**留空则跳过校验**，改名不会造成中断，实际名称会写进日志；代价是失去了「ID 配错或被重新分配」这道唯一的防线。
+
+`FEISHU_DEPARTMENT_ANCHOR` 指的是飞书里代表「公司」的那个部门，作用是在一个飞书租户装了多家公司时，防止 A 公司的员工被建到 B 公司的部门树下。很多租户并没有这样一个节点——按职能划分组织，或者本来就只有一家公司。这种情况把锚点**留空**，整条部门路径都会镜像到网易根部门之下；公司边界由「每租户独立的飞书应用 + 钉死的网易根部门 + 工作邮箱域名校验」共同保证。配置前先看一个真实员工的组织路径，锚点填错会导致所有开通请求被拒。
+
 写入网易的字段有工号、手机号、飞书姓名、目标部门和服务端生成的随机密码。`NETEASE_PASS_CHANGE_FIRST_LOGIN=2` 强制首次 Web 登录改密，改密前客户端不能登录。网易确认写操作成功后，系统先把密码发送给员工，再查询网易确认最终状态。因此，复查超时或失败不会阻断有效密码的发送；页面会禁用两个写操作并提示稍后刷新核对，避免员工重复操作。
 
 任何网易写操作之前，飞书机器人先发一条预检消息，发不出去就拒绝写入。成功后机器人私聊发送邮箱地址、初始密码和 Web 登录地址。密码不回传浏览器、不写入日志。
@@ -196,7 +225,7 @@ python3 -m py_compile app.py
 
 - `READ_ONLY=1` 是出厂默认值，也是所有写操作的总开关。
 - 每个 POST 都需要签名会话 cookie 和 CSRF token。
-- 改密要求飞书授权时间在 `FRESH_AUTH_TTL` 秒以内。
+- 改密要求飞书授权时间在 `FRESH_AUTH_TTL` 秒以内；设为 `0` 即取消这一步。新密码只会发到账号本人的飞书，会话被劫持也偷不到凭据，这道检查防的只是「被人恶意触发一次重置」，而限流和较短的 `SESSION_TTL` 已经限制了这种骚扰。
 - 每次写操作前都会重新读取飞书通讯录里的员工状态。
 - 写操作按人限流（每人每 10 分钟 5 次）并按工号串行；部门创建另有全局锁。
 - 访问日志中会剥掉 OAuth 的查询参数。
@@ -252,11 +281,11 @@ curl -s http://127.0.0.1:8500/healthz
 
 前面放一个做 TLS 终结的反向代理，`PUBLIC_BASE_URL` 填它的公网地址。设置 `TRUST_PROXY=1`，日志里的客户端 IP 才会取自 `X-Forwarded-For`。
 
-上线顺序：保持 `READ_ONLY=1`，依次验证 OAuth、身份卡片、部门路径（必须包含 `FEISHU_DEPARTMENT_ANCHOR`）、机器人投递和网易核对结论；然后把 `READ_ONLY` 改为 `0`，先用测试账号开通一次，再向员工开放。
+上线顺序：保持 `READ_ONLY=1`，依次验证 OAuth、身份卡片、部门路径（必须包含 `FEISHU_DEPARTMENT_ANCHOR`，或把锚点留空）、机器人投递和网易核对结论；然后把 `READ_ONLY` 改为 `0`，先用测试账号开通一次，再向员工开放。
 
 ### 验证
 
-当前测试套件共 20 项，覆盖邮箱开通和密码重置，也覆盖飞书通知失败、网易写后复查失败等回归场景。
+当前测试套件共 34 项，覆盖邮箱开通和密码重置，也覆盖飞书通知失败、网易写后复查失败等回归场景，并验证「注定被拒绝的开通请求既不通知员工也不触碰网易」。账号可用性检查识别网易返回的 `-3 + ACCOUNT.NOTEXIST` 为账号不存在，其他业务错误仍阻止创建。
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests -v

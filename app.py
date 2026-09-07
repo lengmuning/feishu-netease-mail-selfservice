@@ -79,7 +79,13 @@ READ_ONLY = os.environ.get("READ_ONLY", "1") != "0"
 PASS_CHANGE_FIRST_LOGIN = int(os.environ.get("NETEASE_PASS_CHANGE_FIRST_LOGIN", "2"))
 VISIBLE_IN_ADDR = int(os.environ.get("NETEASE_VISIBLE_IN_ADDR", "1"))
 INITIAL_PASSWORD_DIGITS = int(os.environ.get("INITIAL_PASSWORD_DIGITS", "6"))
+# Seconds a Feishu authentication stays fresh enough for the actions in
+# FRESH_AUTH_ACTIONS.  0 or less switches re-authentication off entirely: the
+# generated password only ever reaches the account owner's own Feishu, so a
+# hijacked session cannot steal a credential either way, and the check buys
+# protection against nuisance resets alone.
 FRESH_AUTH_TTL = int(os.environ.get("FRESH_AUTH_TTL", "300"))
+FRESH_AUTH_ENABLED = FRESH_AUTH_TTL > 0
 
 EMPLOYEE_NO_RE = re.compile(r"^[A-Za-z0-9._-]{2,64}$")
 ACCOUNT_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{1,63}$")
@@ -262,12 +268,27 @@ def account_phones(account: Dict[str, Any]) -> Set[str]:
 
 
 def relative_department_path(department_path: Iterable[Any]) -> List[str]:
-    """Return only departments below the configured Feishu company anchor."""
+    """Return the departments to mirror below the pinned NetEase root unit.
+
+    ``FEISHU_DEPARTMENT_ANCHOR`` names the Feishu department that stands for the
+    company, and only the part of the path below it is mirrored.  That is what
+    keeps one company's employees out of another's unit tree when a single
+    Feishu tenant holds several companies.
+
+    Leave the anchor empty when the Feishu tree has no such node -- a tenant
+    organized by function rather than by legal entity, or one that holds a
+    single company.  The whole path is then mirrored below the root unit, and
+    the company boundary is the one already enforced elsewhere: a dedicated
+    Feishu application per tenant, the pinned root unit, and the work-email
+    domain check in ``provision_target``.
+    """
     cleaned: List[str] = []
     for value in department_path:
         name = str(value or "").strip()
         if name and (not cleaned or cleaned[-1] != name):
             cleaned.append(name)
+    if not FEISHU_DEPARTMENT_ANCHOR:
+        return cleaned
     try:
         anchor_index = cleaned.index(FEISHU_DEPARTMENT_ANCHOR)
     except ValueError as exc:
@@ -449,6 +470,10 @@ class NetEaseClient:
         self._unit_write_lock = threading.Lock()
         self._units_cache: Tuple[float, List[Dict[str, Any]]] = (0.0, [])
         self._accounts_cache: Tuple[float, List[Dict[str, Any]]] = (0.0, [])
+        # Name the pinned root unit currently carries in NetEase.  Recorded on
+        # every unit listing so the page can show it and a rename leaves a trace
+        # even when NETEASE_ROOT_UNIT_NAME is empty and nothing is enforced.
+        self.root_unit_name = ""
 
     def configured(self) -> bool:
         return all(
@@ -458,7 +483,6 @@ class NetEaseClient:
                 NETEASE_ORG_OPEN_ID,
                 NETEASE_DOMAIN,
                 NETEASE_ROOT_UNIT_ID,
-                NETEASE_ROOT_UNIT_NAME,
             ]
         )
 
@@ -515,8 +539,30 @@ class NetEaseClient:
         response = self.call("/api/open/unit/getUnitList", {"domain": NETEASE_DOMAIN})
         items = list(self._require_success(response, "查询部门") or [])
         root = next((item for item in items if str(item.get("unitId")) == NETEASE_ROOT_UNIT_ID), None)
-        if not root or str(root.get("unitName") or "").strip() != NETEASE_ROOT_UNIT_NAME:
-            raise ServiceError("网易目标根部门校验失败，已停止查询", 503)
+        if not root:
+            # Without the root unit every later step would silently address an
+            # empty subtree, so stop here whatever the name setting says.
+            raise ServiceError(
+                f"网易中不存在部门 {NETEASE_ROOT_UNIT_ID}，已停止查询", 503
+            )
+        observed = str(root.get("unitName") or "").strip()
+        if NETEASE_ROOT_UNIT_NAME and observed != NETEASE_ROOT_UNIT_NAME:
+            # Name the two values: a rename is otherwise indistinguishable from
+            # a wrong unit id, and the difference decides how you recover.
+            raise ServiceError(
+                f"网易部门 {NETEASE_ROOT_UNIT_ID} 实际名称为「{observed}」，"
+                f"与配置的「{NETEASE_ROOT_UNIT_NAME}」不一致，已停止查询",
+                503,
+            )
+        if observed != self.root_unit_name:
+            if self.root_unit_name:
+                log.warning(
+                    "netease root unit %s renamed from %r to %r",
+                    NETEASE_ROOT_UNIT_ID, self.root_unit_name, observed,
+                )
+            else:
+                log.info("netease root unit %s is named %r", NETEASE_ROOT_UNIT_ID, observed)
+            self.root_unit_name = observed
         with self._cache_lock:
             self._units_cache = (time.time() + 300, items)
         return items
@@ -623,7 +669,13 @@ class NetEaseClient:
         )
         if response.get("success"):
             return bool(response.get("data"))
-        if response.get("code") == NETEASE_NOT_FOUND:
+        # getAccount also reports an absent account via the generic -3 code.
+        # Require its exact business marker; other -3 failures remain errors.
+        account_not_found = response.get("code") == -3 and re.search(
+            r"(?<![A-Za-z0-9_.])ACCOUNT\.NOTEXIST(?=:|\s|$)",
+            str(response.get("message") or ""),
+        ) is not None
+        if response.get("code") == NETEASE_NOT_FOUND or account_not_found:
             return False
         raise ServiceError(
             "网易接口查询账号可用性失败",
@@ -747,6 +799,9 @@ class NetEaseClient:
             "provision": writable and state == "eligible",
             "password": writable and state == "matched",
         }
+        # Lets the page describe the password reset accurately instead of
+        # promising a re-authentication step that may be switched off.
+        result["freshAuthRequired"] = FRESH_AUTH_ENABLED
         return result
 
     def _evaluate(self, contact: Dict[str, Any], refresh: bool = False) -> Dict[str, Any]:
@@ -1088,6 +1143,8 @@ class Handler(BaseHTTPRequestHandler):
         return claims
 
     def _require_fresh_auth(self, claims: Dict[str, Any]) -> None:
+        if not FRESH_AUTH_ENABLED:
+            return
         auth_time = int(claims.get("auth_time") or claims.get("iat") or 0)
         if int(time.time()) - auth_time > FRESH_AUTH_TTL:
             raise ServiceError("敏感操作前需要重新通过飞书验证身份", 401)
@@ -1146,8 +1203,11 @@ class Handler(BaseHTTPRequestHandler):
         body = target.read_bytes()
         if target.name == "index.html":
             body = body.replace(b"{{BASE_PATH}}", BASE_PATH.encode("utf-8"))
+            # Prefer the configured name; with verification switched off fall
+            # back to whatever NetEase last reported for the pinned unit.
+            display_root = NETEASE_ROOT_UNIT_NAME or netease.root_unit_name or "—"
             body = body.replace(
-                b"{{ROOT_UNIT_NAME}}", html.escape(NETEASE_ROOT_UNIT_NAME or "未配置").encode("utf-8")
+                b"{{ROOT_UNIT_NAME}}", html.escape(display_root).encode("utf-8")
             )
         content_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
         if target.suffix in {".html", ".js", ".css"}:
@@ -1267,8 +1327,37 @@ class Handler(BaseHTTPRequestHandler):
             display_name = str(contact.get("name") or claims.get("name") or "")
             password = generate_initial_password()
 
+            # Resolve the target with read-only calls first.  A request that is
+            # going to be rejected must not announce itself to the employee, who
+            # would otherwise be left with "请稍候" and no follow-up message.
+            if action == "provision":
+                account_name, work_email = provision_target(contact)
+                if netease.account_exists(account_name):
+                    raise ServiceError("网易中已存在同名账号，开通已拒绝，请联系管理员核查", 409)
+                department_path, department_warning = feishu.department_path(contact)
+                if not department_path:
+                    # Report why the path is missing instead of letting the
+                    # anchor check blame an organization path we never read.
+                    raise ServiceError(
+                        "未能读取飞书组织路径（"
+                        + (department_warning or "原因未知")
+                        + "），开通已拒绝",
+                        409,
+                    )
+                # Reject a path we cannot map before telling the employee the
+                # mailbox is on its way; resolve_or_create_unit repeats this.
+                relative_department_path(department_path)
+            else:
+                record = status.get("record") or {}
+                account_name = str(record.get("accountName") or "")
+                work_email = str(record.get("primaryEmail") or "")
+                if not account_name:
+                    raise ServiceError("未能确定要重置密码的邮箱账号", 409)
+
             # Fail closed when Feishu cannot deliver: a password we generate but
             # cannot hand over would lock the employee out of their own mailbox.
+            # Every NetEase write below this point is gated on it, unit creation
+            # included.
             try:
                 send_feishu_text_with_retry(open_id, precheck_text(action, display_name))
             except ServiceError as exc:
@@ -1278,10 +1367,6 @@ class Handler(BaseHTTPRequestHandler):
                 ) from exc
 
             if action == "provision":
-                account_name, work_email = provision_target(contact)
-                if netease.account_exists(account_name):
-                    raise ServiceError("网易中已存在同名账号，开通已拒绝，请联系管理员核查", 409)
-                department_path, _ = feishu.department_path(contact)
                 unit_id, created_units = netease.resolve_or_create_unit(department_path)
                 netease.create_account(
                     account_name,
@@ -1298,11 +1383,6 @@ class Handler(BaseHTTPRequestHandler):
                     else ""
                 )
             else:
-                record = status.get("record") or {}
-                account_name = str(record.get("accountName") or "")
-                work_email = str(record.get("primaryEmail") or "")
-                if not account_name:
-                    raise ServiceError("未能确定要重置密码的邮箱账号", 409)
                 unit_warning = ""
                 netease.update_password(account_name, password)
                 message = "企业邮箱密码重置成功"
