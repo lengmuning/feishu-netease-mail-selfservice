@@ -134,6 +134,31 @@ class ProvisionGuardTests(unittest.TestCase):
             ["运营中心", "供应保障部", "材料供应链", "成都仓储岗"],
         )
 
+    def test_consecutive_duplicate_department_names_are_preserved(self):
+        app.FEISHU_DEPARTMENT_ANCHOR = ""
+        path = ["示例新材料有限公司", "示例新材料有限公司", "清洗厂", "清洗工艺科"]
+        self.assertEqual(app.relative_department_path(path), path)
+
+    def test_existing_repeated_name_hierarchy_is_resolved_exactly(self):
+        app.FEISHU_DEPARTMENT_ANCHOR = ""
+        app.CREATE_MISSING_UNITS = False
+
+        class FakeNetEase(app.NetEaseClient):
+            def units(self, refresh=False):
+                return [
+                    {"unitId": ROOT_UNIT_ID, "unitName": COMPANY, "unitParentId": ""},
+                    {"unitId": "20", "unitName": "示例新材料有限公司", "unitParentId": ROOT_UNIT_ID},
+                    {"unitId": "21", "unitName": "示例新材料有限公司", "unitParentId": "20"},
+                    {"unitId": "22", "unitName": "清洗厂", "unitParentId": "21"},
+                    {"unitId": "23", "unitName": "清洗工艺科", "unitParentId": "22"},
+                ]
+
+        unit_id, created = FakeNetEase().resolve_or_create_unit(
+            ["示例新材料有限公司", "示例新材料有限公司", "清洗厂", "清洗工艺科"]
+        )
+        self.assertEqual(unit_id, "23")
+        self.assertEqual(created, [])
+
     def test_missing_department_is_created_under_exact_parent(self):
         app.CREATE_MISSING_UNITS = True
 
