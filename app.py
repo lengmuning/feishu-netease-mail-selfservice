@@ -285,7 +285,9 @@ def relative_department_path(department_path: Iterable[Any]) -> List[str]:
     cleaned: List[str] = []
     for value in department_path:
         name = str(value or "").strip()
-        if name and (not cleaned or cleaned[-1] != name):
+        # Department identity includes its position in the hierarchy. Adjacent
+        # parent and child units may legitimately carry the same display name.
+        if name:
             cleaned.append(name)
     if not FEISHU_DEPARTMENT_ANCHOR:
         return cleaned

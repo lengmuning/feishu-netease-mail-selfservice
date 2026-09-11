@@ -171,7 +171,8 @@ before opening it up.
 
 ### Verification
 
-The suite currently contains 34 tests, including exact recognition of NetEase's
+The suite currently contains 36 tests, including exact preservation of adjacent
+departments with the same display name and recognition of NetEase's
 `-3 + ACCOUNT.NOTEXIST` response (other business failures still block creation),
 regression cases for both provisioning and password reset when notification
 delivery or the NetEase read-back fails, and cases proving a provision that
@@ -285,7 +286,7 @@ curl -s http://127.0.0.1:8500/healthz
 
 ### 验证
 
-当前测试套件共 34 项，覆盖邮箱开通和密码重置，也覆盖飞书通知失败、网易写后复查失败等回归场景，并验证「注定被拒绝的开通请求既不通知员工也不触碰网易」。账号可用性检查识别网易返回的 `-3 + ACCOUNT.NOTEXIST` 为账号不存在，其他业务错误仍阻止创建。
+当前测试套件共 36 项，覆盖邮箱开通和密码重置，也覆盖连续同名部门、飞书通知失败、网易写后复查失败等回归场景，并验证「注定被拒绝的开通请求既不通知员工也不触碰网易」。账号可用性检查识别网易返回的 `-3 + ACCOUNT.NOTEXIST` 为账号不存在，其他业务错误仍阻止创建。
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests -v
